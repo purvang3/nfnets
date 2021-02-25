@@ -6,6 +6,7 @@ I have just taken out main changes mentioned in paper from code and added my com
 on top of each part for rapid understanding. all code is from original code published with paper by deepmind.
 """
 
+
 import haiku as hk
 import jax
 import jax.numpy as jnp
@@ -15,7 +16,7 @@ import numpy as np
 ############################ Part 1 ########################################
 # activations are applied after convolution operation.
 # key note here is "Magic constant" multiplied to each activation.
-
+# Gamma scaled activation function for preservation of varience
 nonlinearities = {
     'identity': lambda x: x,
     'celu': lambda x: jax.nn.celu(x) * 1.270926833152771,
@@ -41,7 +42,7 @@ nonlinearities = {
 
 # instead of regular convolutions, weights standardized convolution is implemented to
 # capture local relations.
-
+# prevention of a mean-shift in the hidden activations by introducing Scaled Weight Standardization
 class WSConv2D(hk.Conv2D):
     """2D Convolution with Scaled Weight Standardization and affine gain+bias."""
 
@@ -102,8 +103,42 @@ class StochDepth(hk.Module):
 
 
 ############################ Part 4 ########################################
+def compute_norm(x, axis, keepdims):
+  """Returns norm over arbitrary axis."""
+  norm = jnp.sum(x ** 2, axis=axis, keepdims=keepdims) ** 0.5
+  return norm
+
+
+def unitwise_norm(x):
+  """Computes norms of each output unit separately, assuming (HW)IO weights."""
+  if len(jnp.squeeze(x).shape) <= 1:  # Scalars and vectors
+    axis = None
+    keepdims = False
+  elif len(x.shape) in [2, 3]:  # Linear layers of shape IO
+    axis = 0
+    keepdims = True
+  elif len(x.shape) == 4:  # Conv kernels of shape HWIO
+    axis = [0, 1, 2,]
+    keepdims = True
+  else:
+    raise ValueError(f'Got a parameter with shape not in [1, 2, 3, 4]! {x}')
+  return compute_norm(x, axis, keepdims)
+
 
 # Adaptive Gradient clipping in optimizer
+
+# Claim of paper: With additional regularization and Stochastic Depth,
+# Normalizer-Free ResNets match the test accuracies achieved
+# by batch normalized pre-activation ResNets on ImageNet
+# at batch size 1024. They also significantly outperform their
+# batch normalized counterparts when the batch size is very
+# small, but they perform worse than batch normalized networks for large batch sizes (4096 or higher). Crucially, they
+# do not match the performance of state-of-the-art networks
+# like EfficientNets.
+
+# and to remove problem of larger batch size,adaptive gradient training is used which scale gradients based on
+# param norm value multiplied by learning rate.
+
 class SGD_AGC(Optimizer):  # pylint:disable=invalid-name
   """SGD with Unit-Adaptive Gradient-Clipping.
 
@@ -133,6 +168,8 @@ class SGD_AGC(Optimizer):  # pylint:disable=invalid-name
 
     ### Gradient clipping logic
     if opt_params['clipping'] is not None:
+      # Parameter (weights) norm, deviding to gradient norm will decide how much weight will change
+      # main differece is taking unit wise norm insetead of layer wise norm
       param_norm = jnp.maximum(unitwise_norm(param), opt_params['eps'])
       grad_norm = unitwise_norm(grad)
       max_norm = param_norm * opt_params['clipping']
